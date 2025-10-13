@@ -1,6 +1,8 @@
 # Gaussian World Model (GWM)
 
-| [Project Page](https://gaussian-world-model.github.io/) | [Paper](https://arxiv.org/abs/2508.17600)
+[Project Page](https://gaussian-world-model.github.io/) | [Paper](https://arxiv.org/abs/2508.17600)
+
+| ⚠️ WIP. More codes are still being sorted out.
 
 This repository contains the training code for the Gaussian World Model (GWM), which is a latent Diffusion Transformer (DiT) combined with a 3D variational autoencoder, enabling fine-grained scene-level future state reconstruction with Gaussian Splatting. 
 
