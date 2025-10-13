@@ -1,0 +1,13 @@
+# Configuration for Autoencoder models
+
+# Default model parameters
+name: ae_d64_m64
+point_cloud_size: 2048
+
+use_vae: true
+vae_depth: 4
+num_latents: 64 # 8x8
+latent_dim: 64
+output_dim: 14
+use_kl: false
+# perceptual_weight: 0.1

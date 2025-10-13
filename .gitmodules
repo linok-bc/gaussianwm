@@ -1,0 +1,3 @@
+[submodule "third_party/splatt3r"]
+	path = third_party/splatt3r
+	url = https://github.com/btsmart/splatt3r

@@ -1,0 +1,70 @@
+# @package _global_
+defaults:
+  - dataset: droid
+  - vae: transformer
+  - _self_
+
+# General settings
+seed: 0
+device: cuda
+
+# Model settings
+model:
+  name: ae_d64_m64
+  point_cloud_size: 2048
+
+# Training settings
+train:
+  batch_size: 16
+  epochs: 200
+  accum_iter: 1
+  eval_every: 5  # Evaluate every N epochs
+  save_every: 10  # Save checkpoint every N epochs
+
+# Optimizer settings
+optimizer:
+  lr: null  # Will be calculated from blr if not specified
+  blr: 1e-4  # Base learning rate
+  epochs: ${train.epochs}
+  warmup_epochs: 5
+  weight_decay: 0.05
+  clip_grad: null  # Gradient clipping norm
+  layer_decay: 0.75
+  min_lr: 1e-6
+
+# Dataloader settings
+dataloader:
+  # num_workers: 8
+  num_workers: 0
+  pin_memory: false
+  prefetch_factor: 2
+
+# Distributed training settings
+distributed:
+  rank: null
+  gpu: null
+  distributed: false
+  world_size: 1
+  local_rank: -1
+  dist_on_itp: false
+  dist_backend: nccl
+  dist_url: env://
+  dist_eval: false
+
+# Logging and output
+output_dir: logs/ae/
+log_dir: logs/ae/
+use_wandb: false
+wandb:
+  project: gaussianwm
+  name: ${model.name}
+
+# Resume training
+resume: null  # Path to checkpoint to resume from
+start_epoch: 0
+eval_only: false  # Set to true for evaluation only
+
+# CUDA settings
+cuda_visible_devices: 3
+master_port: 12345
+nproc_per_node: 1
