@@ -13,7 +13,7 @@ from pathlib import Path
 import tensorflow as tf
 import tensorflow_graphics.geometry.transformation as tfg
 
-from gaussianwm.processor.rlds import make_interleaved_dataset, make_single_dataset
+from gaussianwm.processor.rlds import make_single_dataset
 from gaussianwm.processor.rlds.oxe import OXE_NAMED_MIXTURES, get_oxe_dataset_kwargs_and_weights
 # from gaussianwm.processor.rlds.utils.data_utils import NormalizationType, combine_dataset_statistics
 from gaussianwm.processor.rlds.utils.data_utils import NormalizationType
@@ -182,13 +182,13 @@ class DroidDataset(IterableDataset):
                     )
         ]
 
-        dataset_kwargs_list = [{
+        dataset_kwargs = {
             # "name": "droid",
             "name": "droid_100",
             # "name": "berkeley_cable_routing",
             # "filter_functions": filter_functions,
             **BASE_DATASET_KWARGS
-        }]
+        }
 
         # Compute combined normalization stats
         # combined_dataset_statistics = combine_dataset_statistics(
@@ -196,15 +196,10 @@ class DroidDataset(IterableDataset):
         #      for dataset_kwargs in dataset_kwargs_list]
         # )
 
-        # Create the interleaved dataset
-        self.dataset, self.dataset_length, self.dataset_statistics = make_interleaved_dataset(
-            dataset_kwargs_list,
-            sample_weights=[1.0],
+        # Create the single dataset. This was originally implented with interleaved datasets, but I'm dropping that functionality
+        self.dataset, self.dataset_length, self.dataset_statistics = make_single_dataset(
+            dataset_kwargs,
             train=(split == "train"),
-            shuffle_buffer_size=shuffle_buffer_size,
-            batch_size=batch_size,
-            balance_weights=False,
-            # dataset_statistics=combined_dataset_statistics,
             traj_transform_kwargs=dict(
                 window_size=segment_length,
                 future_action_window_size=future_action_window_size,
@@ -221,8 +216,6 @@ class DroidDataset(IterableDataset):
                 ),
                 num_parallel_calls=200,
             ),
-            traj_transform_threads=traj_transform_threads,
-            traj_read_threads=traj_read_threads,
         )
 
         # Apply robomimic transform

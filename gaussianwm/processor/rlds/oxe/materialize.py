@@ -83,8 +83,7 @@ def get_oxe_dataset_kwargs_and_weights(
     action_proprio_normalization_type: NormalizationType = NormalizationType.NORMAL,
 ) -> Tuple[Dict[str, Any], List[float]]:
     """
-    Generates dataset kwargs for a given dataset mix from the Open X-Embodiment dataset. The returned kwargs
-    (per-dataset configs) and weights can be passed directly to `make_interleaved_dataset`.
+    Generates dataset kwargs for a given dataset mix from the Open X-Embodiment dataset. 
 
     :param data_root_dir: Base directory containing RLDS/TFDS-formatted datasets (from Open-X)
     :param mixture_spec: List of (dataset_name, sampling_weight) from `oxe.mixtures.OXE_NAMED_MIXTURES`

@@ -4,9 +4,11 @@ Core interface script for configuring and initializing RLDS datasets.
 Ref: OpenVLA
 """
 
+import os
 import copy
 import inspect
 import json
+from tqdm import tqdm
 from functools import partial
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
@@ -95,8 +97,8 @@ def make_dataset_from_rlds(
         dataset_statistics: (dict|str, optional): dict (or path to JSON file) that contains dataset statistics
             for normalization. If `action_proprio_normalization_type` is "normal", this should contain "mean" and
             "std" keys. If `action_proprio_normalization_type` is "bounds", this should contain "min" and "max"
-            keys. May also provide "num_transitions" and "num_trajectories" keys for downstream usage (e.g., for
-            `make_interleaved_dataset`). If not provided, the statistics will be computed on the fly.
+            keys. May also provide "num_transitions" and "num_trajectories" keys for downstream usage. If not 
+            provided, the statistics will be computed on the fly.
         absolute_action_mask (Sequence[bool], optional): By default, all action dimensions are assumed to be
             relative. This is important for when `future_action_window_size > 0`: actions that are taken
             from beyond the end of the trajectory (or beyond the goal timestep when goal relabeling is used)
@@ -444,168 +446,35 @@ def make_single_dataset(
         train=train,
     )
     dataset = apply_trajectory_transforms(dataset, **traj_transform_kwargs, train=train, dataset_statistics=dataset_statistics)
+    
+    # we need to flatten this from trajectories into frames
+    # maintain a cache so that we don't have to do this expensive iteration multiple times
+    dataset = dataset.flatten()
+    split_name = "train" if train else "val"
+    count_cache_path = os.path.join(
+        dataset_kwargs.get("data_dir", ""),
+        dataset_kwargs["name"],
+        f"frame_count_{split_name}.json",
+    )
+    if os.path.exists(count_cache_path):
+        with open(count_cache_path, "r") as f:
+            num_frames = json.load(f)["num_frames"]
+        print(f"Loaded cached frame count for {split_name}: {num_frames}")
+    else:
+        print(f"Counting frames for {split_name} split (one-time)...")
+        num_frames = 0
+        for _ in tqdm(dataset.as_numpy_iterator(), desc="Counting frames"):
+            num_frames += 1
+        os.makedirs(os.path.dirname(count_cache_path), exist_ok=True)
+        with open(count_cache_path, "w") as f:
+            json.dump({"num_frames": num_frames}, f)
+        print(f"Cached frame count for {split_name}: {num_frames}")
+
+    # Apply frame-level transforms (decode, resize, augment)
     dataset = apply_frame_transforms(dataset, **frame_transform_kwargs, train=train)
 
     # this seems to reduce memory usage without affecting speed
     dataset = dataset.with_ram_budget(1)
 
     # save for later
-    return dataset, dataset_statistics["num_trajectories"], dataset_statistics
-
-
-# === Core Initializer ===
-def make_interleaved_dataset(
-    dataset_kwargs_list: List[Dict],
-    sample_weights: Optional[List[float]] = None,
-    *,
-    train: bool,
-    shuffle_buffer_size: int,
-    traj_transform_kwargs: Optional[Dict] = None,
-    frame_transform_kwargs: Optional[Dict] = None,
-    batch_size: Optional[int] = None,
-    balance_weights: bool = False,
-    traj_transform_threads: Optional[int] = None,
-    traj_read_threads: Optional[int] = None,
-    load_all_data_for_training: bool = True,
-    sample_traj: bool = False,
-) -> dl.DLataset:
-    """
-    Creates an interleaved dataset from list of dataset configs (kwargs). Returns a dataset of batched frames.
-
-    Args:
-        dataset_kwargs_list: list of kwargs, each element of which is passed to `make_dataset_from_rlds`.
-            "num_parallel_calls" and "num_parallel_reads" are overridden using `traj_transform_threads` and
-            `traj_read_threads`, respectively.
-        sample_weights: sampling weights for each dataset in list. If None, defaults to uniform.
-        train: whether this is a training or validation dataset.
-        shuffle_buffer_size: size of the dataset shuffle buffer (in number of frames).
-        traj_transform_kwargs: kwargs passed to `apply_trajectory_transforms`. "num_parallel_calls" is
-            overridden using `traj_transform_threads`.
-        frame_transform_kwargs: kwargs passed to `apply_frame_transforms`.
-        batch_size: batch size, if not provided output is not batched.
-        balance_weights: if True, the sample weights are multiplied by the number of frames in each dataset.
-            This makes it so that, if all the sample weights are equal, one full iteration through the interleaved
-            dataset will correspond to one full iteration through each individual dataset (only in expectation,
-            since in practice the sampling is random).
-        traj_transform_threads: total number of parallel calls for trajectory transforms, distributed across
-            datasets according to their sampling weights. If None, defaults to AUTOTUNE for every dataset.
-        traj_read_threads: total number of parallel read workers for trajectory transforms, distributed across
-            datasets according to their sampling weights. If None, defaults to AUTOTUNE for every dataset.
-        sample_traj: if True, sample trajectories instead of individual steps, and calculate dataset length based
-            on number of trajectories. Each trajectory will be sampled approximately once.
-    """
-    # Default to uniform sampling (if `sample_weights` is not specified)
-    if not sample_weights:
-        sample_weights = [1.0] * len(dataset_kwargs_list)
-
-    if len(sample_weights) != len(dataset_kwargs_list):
-        raise ValueError(f"sample_weights must be None or have length {len(dataset_kwargs_list)}.")
-
-    # Check valid `traj_transform_kwargs` and `frame_transform_kwargs`
-    if (traj_transform_kwargs is None) or (frame_transform_kwargs is None):
-        raise ValueError("Missing `traj_transform_kwargs` and `frame_transform_kwargs`!")
-
-    # Get Dataset Sizes
-    dataset_sizes, traj_sizes, all_dataset_statistics = [], [], {}
-    for dataset_kwargs in dataset_kwargs_list:
-        data_kwargs = copy.deepcopy(dataset_kwargs)
-        if "dataset_frame_transform_kwargs" in data_kwargs:
-            data_kwargs.pop("dataset_frame_transform_kwargs")
-        _, dataset_statistics = make_dataset_from_rlds(
-            **data_kwargs, train=train, load_all_data_for_training=load_all_data_for_training
-        )
-        dataset_sizes.append(dataset_statistics["num_transitions"])
-        traj_sizes.append(dataset_statistics["num_trajectories"])
-        all_dataset_statistics[dataset_kwargs["name"]] = dataset_statistics
-
-    # Get the indices of the "primary" datasets (i.e., datasets with sample_weight == 1.0)
-    primary_dataset_indices = np.array([idx for idx in range(len(sample_weights)) if sample_weights[idx] == 1.0])
-
-    # Balance and Normalize Weights
-    if balance_weights:
-        if sample_traj:
-            sample_weights = np.array(sample_weights) * np.array(traj_sizes)
-        else:
-            sample_weights = np.array(sample_weights) * np.array(dataset_sizes)
-    sample_weights = np.array(sample_weights) / np.sum(sample_weights)
-    pprint_data_mixture(dataset_kwargs_list, sample_weights)
-
-    # Effective Dataset Length = Number of samples until each dataset has completed at least one epoch
-    #   =>> Note :: Only counting the "primary" datasets (i.e., datasets with sample_weight == 1.0)
-    if sample_traj:
-        dataset_len = int((np.array(traj_sizes) / sample_weights)[primary_dataset_indices].max())
-    else:
-        dataset_len = int((np.array(dataset_sizes) / sample_weights)[primary_dataset_indices].max())
-
-    # Allocate Threads based on Weights
-    threads_per_dataset = allocate_threads(traj_transform_threads, sample_weights)
-    reads_per_dataset = allocate_threads(traj_read_threads, sample_weights)
-
-    print("Threads per Dataset: %s", threads_per_dataset)
-    print("Reads per Dataset: %s", reads_per_dataset)
-
-    # Construct Datasets
-    print("Constructing datasets...")
-    datasets = []
-    for dataset_kwargs, threads, reads in zip(
-        dataset_kwargs_list,
-        threads_per_dataset,
-        reads_per_dataset,
-    ):
-        dataset_frame_transform_kwargs = (
-            dataset_kwargs.pop("dataset_frame_transform_kwargs")
-            if "dataset_frame_transform_kwargs" in dataset_kwargs
-            else {}
-        )
-        dataset, _ = make_dataset_from_rlds(
-            **dataset_kwargs,
-            train=train,
-            num_parallel_calls=threads,
-            num_parallel_reads=reads,
-            dataset_statistics=all_dataset_statistics[dataset_kwargs["name"]],
-            load_all_data_for_training=load_all_data_for_training,
-        )
-        dataset = apply_trajectory_transforms(
-            dataset.repeat(),
-            **traj_transform_kwargs,
-            num_parallel_calls=threads,
-            dataset_statistics=all_dataset_statistics[dataset_kwargs["name"]],
-            train=train,
-        )
-        
-        if not sample_traj:
-            dataset = dataset.flatten(num_parallel_calls=threads)
-            
-        dataset = apply_per_dataset_frame_transforms(dataset, **dataset_frame_transform_kwargs)
-        datasets.append(dataset)
-
-    # Interleave at the Frame/Trajectory Level
-    dataset: dl.DLataset = dl.DLataset.sample_from_datasets(datasets, sample_weights)
-
-    # If sampling by trajectory, flatten after interleaving to maintain trajectory integrity
-    if sample_traj:
-        dataset = dataset.flatten(num_parallel_calls=tf.data.AUTOTUNE)
-
-    # Validation =>> fix a single shuffle buffer of data and cache it in RAM; prevents gradual memory increase!
-    if not train:
-        dataset = dataset.take(shuffle_buffer_size).cache()
-
-    # Shuffle the Dataset
-    #   =>> IMPORTANT :: Shuffle AFTER .cache(), or else memory will still leak!
-    dataset = dataset.shuffle(shuffle_buffer_size)
-
-    # Apply Frame Transforms
-    print("Applying frame transforms on dataset...")
-    dataset = apply_frame_transforms(dataset, **frame_transform_kwargs, train=train)
-
-    # [Contract] When training VLA Policies, we let the Collator handle Batching!
-    if batch_size is not None:
-        dataset = dataset.batch(batch_size)
-
-    # Note =>> Seems to reduce memory usage without affecting speed?
-    dataset = dataset.with_ram_budget(1)
-
-    # Save for Later
-    dataset.sample_weights = sample_weights
-
-    return dataset, dataset_len, all_dataset_statistics
+    return dataset, num_frames, dataset_statistics
