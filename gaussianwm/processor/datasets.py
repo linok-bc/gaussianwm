@@ -372,7 +372,7 @@ class OXEDataset(IterableDataset):
 
 
 def build_gaussian_splatting_reconstruction_dataset(split, cfg):
-    if cfg.dataset_name == 'droid':
+    if cfg.dataset_name == 'droid' or 'droid_100':
         return DroidDataset(
             data_path=cfg.data_path,
             segment_length=cfg.segment_length,
