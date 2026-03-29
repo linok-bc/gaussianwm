@@ -13,13 +13,20 @@ model:
   name: ae_d64_m64
   point_cloud_size: 2048
 
+# Cache settings (for point cloud precomputations)
+cache:
+  root_dir: ${oc.env:GWM_PATH}/data/cached_pointclouds
+  dataset_name: droid_100
+  shard_size: 1024
+  splatt3r_batch_size: 8
+
 # Training settings
 train:
-  batch_size: 16
-  epochs: 200
+  batch_size: 512
+  epochs: 50
   accum_iter: 1
   eval_every: 5  # Evaluate every N epochs
-  save_every: 10  # Save checkpoint every N epochs
+  save_every: 5  # Save checkpoint every N epochs
 
 # Optimizer settings
 optimizer:
@@ -34,9 +41,8 @@ optimizer:
 
 # Dataloader settings
 dataloader:
-  # num_workers: 8
   num_workers: 0
-  pin_memory: false
+  pin_memory: true
   prefetch_factor: 2
 
 # Distributed training settings
@@ -65,6 +71,6 @@ start_epoch: 0
 eval_only: false  # Set to true for evaluation only
 
 # CUDA settings
-cuda_visible_devices: 3
+cuda_visible_devices: 1
 master_port: 12345
 nproc_per_node: 1

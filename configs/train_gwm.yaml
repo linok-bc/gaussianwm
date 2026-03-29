@@ -2,7 +2,7 @@
 defaults:
   - _self_
   - world_model: gwm
-  - dataset: droid
+  - dataset: droid_100
 
 # General settings
 seed: 42
