@@ -15,17 +15,13 @@ import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 import hydra
 from omegaconf import DictConfig, OmegaConf
-import einops
-from pytorch3d.ops import sample_farthest_points as fps
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from processor.regressor import Splatt3rRegressor
 from gaussianwm.encoder.models_ae import create_autoencoder
+from gaussianwm.processor.cached_dataset import build_cached_dataset
 import util.distributed_utils as distributed_utils
 import util.lr_utils as lr_utils
-import util.tensor_utils as TensorUtils
-from processor.datasets import build_gaussian_splatting_reconstruction_dataset
 from util.distributed_utils import NativeScalerWithGradNormCount as NativeScaler
 
 
@@ -37,7 +33,6 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, los
     header = f'Epoch: [{epoch}]'
     print_freq = 20
 
-    splatt3r = Splatt3rRegressor().to(device)
     accum_iter = cfg.train.accum_iter
     kl_weight = 1e-3
 
@@ -46,26 +41,9 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, los
     if log_writer is not None:
         cprint(f'log_dir: {log_writer.log_dir}', 'green')
 
-    for data_iter_step, batch in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        obs = batch[0]
-
-        image1 = obs
-        image1 = TensorUtils.to_device(TensorUtils.to_float(image1), device)
-
-        image1 = einops.rearrange(image1, 'b t h w c -> (b t) c h w')
-
-        with torch.no_grad():
-            points, _ = splatt3r.forward_tensor(image1)
-
-        SH_C0 = 0.28209479177387814
-        colors = 0.5 + SH_C0 * points[..., -4:-1]
-        points[..., -4:-1] = colors / 255.0
-
-        points, _ = fps(points, K=cfg.model.point_cloud_size)
-        labels = points.clone()
-
+    for data_iter_step, points in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         points = points.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+        labels = points.clone()
 
         with torch.amp.autocast(device_type="cuda", enabled=False):
             outputs = model(points, points)
@@ -123,33 +101,13 @@ def train_one_epoch(model, criterion, data_loader, optimizer, device, epoch, los
 def evaluate(model, data_loader, device, cfg):
     model.eval()
     criterion = torch.nn.MSELoss()
-    splatt3r = Splatt3rRegressor().to(device)
 
     metric_logger = distributed_utils.MetricLogger(delimiter="  ")
     header = 'Eval:'
 
-    for batch in tqdm(metric_logger.log_every(data_loader, 50, header), desc="Evaluation"):
-        obs = batch[0]
-
-        image1, image2 = obs['robot0_agentview_left_image'], obs['robot0_agentview_right_image']
-        image1 = TensorUtils.to_device(TensorUtils.to_float(image1), device)
-        image2 = TensorUtils.to_device(TensorUtils.to_float(image2), device)
-
-        image1 = einops.rearrange(image1, 'b t h w c -> (b t) c h w')
-        image2 = einops.rearrange(image2, 'b t h w c -> (b t) c h w')
-
-        with torch.no_grad():
-            points, _ = splatt3r.forward_tensor(image1)
-
-        SH_C0 = 0.28209479177387814
-        colors = 0.5 + SH_C0 * points[..., -4:-1]
-        points[..., -4:-1] = colors / 255.0
-
-        points, _ = fps(points, K=cfg.model.point_cloud_size)
-        labels = points.clone()
-
+    for points in metric_logger.log_every(data_loader, 50, header):
         points = points.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+        labels = points.clone()
 
         with torch.amp.autocast(device_type="cuda", enabled=False):
             outputs = model(points, points)
@@ -178,6 +136,7 @@ def evaluate(model, data_loader, device, cfg):
     print(f"* Eval loss: {metric_logger.loss.global_avg:.6f}")
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
 
 @hydra.main(version_base=None, config_path="../configs", config_name="train_vae")
 def main(cfg: DictConfig):
@@ -208,8 +167,9 @@ def main(cfg: DictConfig):
 
     cudnn.benchmark = True
 
-    dataset_train = build_gaussian_splatting_reconstruction_dataset('train', cfg=cfg.dataset)
-    dataset_val = build_gaussian_splatting_reconstruction_dataset('val', cfg=cfg.dataset)
+    # Load cached point cloud datasets
+    dataset_train = build_cached_dataset('train', cfg)
+    dataset_val = build_cached_dataset('val', cfg)
 
     logger.info(f'Train dataset size: {len(dataset_train)}')
     logger.info(f'Val dataset size: {len(dataset_val)}')
@@ -226,14 +186,20 @@ def main(cfg: DictConfig):
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
         batch_size=cfg.train.batch_size,
+        shuffle=True,
         num_workers=cfg.dataloader.num_workers,
+        pin_memory=cfg.dataloader.pin_memory,
+        drop_last=True,
     )
 
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val,
-        batch_size=1,
+        batch_size=cfg.train.batch_size,
+        shuffle=False,
         num_workers=cfg.dataloader.num_workers,
+        pin_memory=cfg.dataloader.pin_memory,
     )
+
     model = create_autoencoder(
         depth=cfg.vae.vae_depth,
         dim=cfg.vae.latent_dim,
@@ -292,7 +258,10 @@ def main(cfg: DictConfig):
             cfg=cfg
         )
 
-        if cfg.output_dir and (epoch % 10 == 0 or epoch + 1 == cfg.train.epochs):
+        if cfg.output_dir and (epoch % cfg.train.eval_every == 0 or epoch + 1 == cfg.train.epochs):
+            eval_stats = evaluate(model, data_loader_val, device, cfg)
+
+        if cfg.output_dir and (epoch % cfg.train.save_every == 0 or epoch + 1 == cfg.train.epochs):
             distributed_utils.save_model(
                 args=cfg, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
